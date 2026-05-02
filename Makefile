@@ -1,10 +1,19 @@
-obj-m += main.o
+CC := gcc
+CFLAGS := -Wall -Wextra -std=c11 -I.
 
-KDIR := /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
+TARGET := app
+SRC := main.c $(wildcard rfilesystem/*.c)
+OBJ := $(SRC:.c=.o)
 
-all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $^
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	rm -f $(OBJ) $(TARGET)

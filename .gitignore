@@ -1,0 +1,12 @@
+app
+*.o
+*.d
+
+# Optional build directories
+build/
+bin/
+
+# Editor/temp files
+*.swp
+*.swo
+*~
