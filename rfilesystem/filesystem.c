@@ -7,9 +7,10 @@
 #include <stdio.h>
 
 #define MAX_ARG (16) // max number of arguments to parse
+#define MAX_FD  (128) // max nummer of file descriptors
 
 static dir_t *root = NULL;
-static uint64_t fd = {0}; // 64 files descriptors
+static hard_link_t *fd[MAX_FD] = {0};
 static size_t id = 0;
 
 static int8_t __open_fd(const char *filepath) {
@@ -22,6 +23,7 @@ static int8_t __open_fd(const char *filepath) {
     // find file in dir
     while (step != NULL) {
         if (strcmp(step->name, filepath) == 0) {
+            step->meta->flags.is_open = 1;
             file_find = 1;
             break;
         }
@@ -33,11 +35,9 @@ static int8_t __open_fd(const char *filepath) {
         return -2; // can't find file in directory
 
     // get fd from fd list
-    for (uint8_t i = 0; i < (sizeof(uint64_t) * 8); i++) {
-        uint64_t fd_mask = 1 << i;
-        uint8_t is_fd_free = fd & fd_mask;
-        if (!is_fd_free) {
-            fd |= fd_mask;
+    for (uint8_t i = 0; i < MAX_FD; i++) {
+        if (!fd[i]) {
+            fd[i] = step;
             return i;
         }
     }
@@ -46,18 +46,47 @@ static int8_t __open_fd(const char *filepath) {
 }
 
 static int8_t __close_fd(const unsigned long selected_fd) {
-    uint8_t is_fd_reserved = (fd >> selected_fd) & 1;
-
-    if (!is_fd_reserved) {
+    if (!fd[selected_fd] || !fd[selected_fd]->meta) {
         return -1;
     }
 
-    fd &= ~(1 << selected_fd);
+    fd[selected_fd] = NULL;
+    fd[selected_fd]->meta->offset = 0;
 
     return 0;
 }
 
-static int8_t __write_fd(const uint8_t fd) {
+static int8_t __seek_fd(const uint8_t selected_fd, const uint64_t offset) {
+    if (!fd[selected_fd] && fd[selected_fd]->meta)
+        return -1;
+
+    inode_t *selected_inode = fd[selected_fd]->meta;
+
+    if (!selected_inode)
+        return -2;
+
+    // Handle if offset is bigger, than file size
+    if (selected_inode->file_size < offset) {
+        size_t create_block = (offset - selected_inode->file_size) / MAX_B;
+        selected_inode->file_size = create_block * MAX_B;
+        block_t *step = selected_inode->head;
+
+        if (!step)
+            return -3;
+
+        // Create new data block
+        for (size_t i = create_block; i > 0; i--) {
+            step->next = bl_create(step, NULL);
+            step = step->next;
+        }
+    }
+
+    selected_inode->offset = offset;
+
+    return 0;    
+}
+
+static int8_t __write_fd(const uint8_t selected_fd) {
     return 0;
 }
 
@@ -137,12 +166,13 @@ static int8_t __stat_file(char *path) {
 
     while (step != NULL) { 
         if (strcmp(path, step->name) == 0) {
-            printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\n", 
+            printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\noffset: %lu\n", 
                 step->meta->id,
                 step->meta->file_size,
                 step->meta->h_links_number,
                 step->meta->create_time,
-                step->name
+                step->name,
+                step->meta->offset
             );   
 
             return 0;
@@ -214,20 +244,72 @@ int8_t fs_parse_command(char *comm_line) {
             __show_directory();
             return 0;
         case 's':
-            if (!arguments[1]) {
-                printf("Enter arguments\n");
-                return -1;
-            } 
+            switch (command[1]) {
+                case 't':
+                    if (!arguments[1]) {
+                        printf("Enter arguments\n");
+                        return -1;
+                    } 
 
-            int8_t result = __stat_file(arguments[1]);
+                    int8_t result = __stat_file(arguments[1]);
 
-            if (result == -2) {
-                printf("Can't find file %s\n", arguments[1]);
-                return -1;
+                    if (result == -2) {
+                        printf("Can't find file %s\n", arguments[1]);
+                        return -1;
+                    }
+
+                    return 0;
+                case 'e': {
+                    char *endptr = NULL;
+                    unsigned int cfd, coffset;
+                    if (!arguments[1] || !arguments[2]) {
+                        printf("Enter fd and offset");
+                        return -1;
+                    }
+                    
+                    cfd = strtoul(
+                        arguments[1],
+                        &endptr,
+                        0
+                    );
+
+                    if (endptr == arguments[1] || *endptr != '\0') {
+                        printf("Enter FD\n");
+                        return -1;
+                    }
+
+                    endptr = NULL;
+
+                    coffset = strtoul(
+                        arguments[2],
+                        &endptr,
+                        0
+                    );
+
+                    if (endptr == arguments[2] || *endptr != '\0') {
+                        printf("Enter offset\n");
+                        return -1;
+                    }
+
+                    int8_t ret = __seek_fd(cfd, coffset);
+
+                    switch (ret) {
+                        case -1:
+                            printf("Wrong FD\n");
+                            return -1;
+                        case -2:
+                            printf("Uninit inode\n");
+                            return -1;
+                        case -3:
+                            printf("Block error\n");
+                            return -1;
+                        default:
+                            printf("Set offset\n");
+                            return 0;
+                    }
+                }
             }
-
-            return 0;
-
+            return -1;
         case 'o':
             if (!arguments[1]) {
                 printf("Enter filepath\n");

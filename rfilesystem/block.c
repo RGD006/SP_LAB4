@@ -30,6 +30,7 @@ inode_t *in_create(const size_t _id, const size_t _file_size) {
     newi->h_links_number = 1;
     newi->create_time = time(NULL);
     newi->flags.is_open = 0;
+    newi->offset = 0;
     newi->head = bl_create(NULL, NULL);
 
     return newi;

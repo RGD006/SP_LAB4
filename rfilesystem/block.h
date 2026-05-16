@@ -19,6 +19,7 @@ typedef struct _inode_t {
     size_t id;
     size_t file_size;
     size_t h_links_number;
+    uint64_t offset;
     time_t create_time;
     struct flags {
         uint8_t is_open: 1;
