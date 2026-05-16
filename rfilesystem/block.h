@@ -7,9 +7,10 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define MAX_B (512) // max block size in bytes
+#define MAX_B (10) // max block size in bytes
 
 typedef struct _block_t {
+    size_t memsize;
     uint8_t data[MAX_B];
     struct _block_t *next;
     struct _block_t *prev;
@@ -19,7 +20,7 @@ typedef struct _inode_t {
     size_t id;
     size_t file_size;
     size_t h_links_number;
-    uint64_t offset;
+    size_t offset;
     time_t create_time;
     struct flags {
         uint8_t is_open: 1;

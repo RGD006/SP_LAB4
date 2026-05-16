@@ -46,7 +46,7 @@ static int8_t __open_fd(const char *filepath) {
 }
 
 static int8_t __close_fd(const unsigned long selected_fd) {
-    if (!fd[selected_fd] || !fd[selected_fd]->meta) {
+    if (selected_fd >= MAX_FD || !fd[selected_fd] || !fd[selected_fd]->meta) {
         return -1;
     }
 
@@ -57,13 +57,10 @@ static int8_t __close_fd(const unsigned long selected_fd) {
 }
 
 static int8_t __seek_fd(const uint8_t selected_fd, const uint64_t offset) {
-    if (!fd[selected_fd] && fd[selected_fd]->meta)
+    if (selected_fd >= MAX_FD || !fd[selected_fd] || !fd[selected_fd]->meta)
         return -1;
 
     inode_t *selected_inode = fd[selected_fd]->meta;
-
-    if (!selected_inode)
-        return -2;
 
     // Handle if offset is bigger, than file size
     if (selected_inode->file_size < offset) {
@@ -72,7 +69,7 @@ static int8_t __seek_fd(const uint8_t selected_fd, const uint64_t offset) {
         block_t *step = selected_inode->head;
 
         if (!step)
-            return -3;
+            return -2;
 
         // Create new data block
         for (size_t i = create_block; i > 0; i--) {
@@ -86,7 +83,109 @@ static int8_t __seek_fd(const uint8_t selected_fd, const uint64_t offset) {
     return 0;    
 }
 
-static int8_t __write_fd(const uint8_t selected_fd) {
+static int8_t __write_fd(const uint8_t selected_fd, uint64_t size) {
+    if (selected_fd >= MAX_FD || !fd[selected_fd] || !fd[selected_fd]->meta)
+        return -1;
+
+    inode_t *inode = fd[selected_fd]->meta;
+    block_t *blk = inode->head;
+    size_t left = (size > SIZE_MAX) ? SIZE_MAX : (size_t)size;
+    size_t off = inode->offset;
+    size_t skip_blocks = off / MAX_B;
+    size_t in_block = off % MAX_B;
+
+    while (skip_blocks--) {
+        if (blk->next == NULL) {
+            blk->next = bl_create(blk, NULL);
+        }
+
+        blk = blk->next;
+    }
+
+    while (left > 0) {
+        size_t chunk = MAX_B - in_block; 
+
+        if (chunk > left)
+            chunk = left;
+
+        memset(blk->data + in_block, 0, chunk);
+
+        if (blk->memsize < in_block + chunk)
+            blk->memsize = in_block + chunk;
+
+        off += chunk;
+        left -= chunk;
+        in_block = 0;
+
+        if (left > 0) {
+            if (!blk->next) {
+                blk->next = bl_create(blk, NULL);
+                if (!blk->next)
+                    return -3;
+            }
+        }
+
+        blk = blk->next;
+    }
+
+    inode->offset = off;
+    if (inode->file_size < off)
+        inode->file_size = off;
+
+    return 0;
+}
+
+static int8_t __read_fd(const uint8_t selected_fd, uint64_t size) {
+    if (selected_fd >= MAX_FD || !fd[selected_fd] || !fd[selected_fd]->meta)
+        return -1;
+
+    inode_t *inode = fd[selected_fd]->meta;
+    block_t *blk = inode->head;
+
+    if (!blk)
+        return -2;
+
+    if (inode->offset >= inode->file_size)
+        return 0;
+
+    size_t left = (size > SIZE_MAX) ? SIZE_MAX : (size_t)size;
+    size_t available = inode->file_size - inode->offset;
+
+    if (left > available)
+        left = available;
+
+    size_t off = inode->offset;
+    size_t skip_blocks = off / MAX_B;
+    size_t in_block = off % MAX_B;
+
+    while (skip_blocks--) {
+        if (!blk->next)
+            return -2;
+        blk = blk->next;
+    }
+
+    while (left > 0) {
+        size_t chunk = MAX_B - in_block;
+        if (chunk > left)
+            chunk = left;
+
+        for (size_t i = 0; i < chunk; i++) {
+            printf("%02X ", blk->data[in_block + i]);
+        }
+
+        off += chunk;
+        left -= chunk;
+        in_block = 0;
+
+        if (left > 0) {
+            if (!blk->next)
+                break;
+            blk = blk->next;
+        }
+    }
+
+    inode->offset = off;
+    putchar('\n');
     return 0;
 }
 
@@ -332,6 +431,94 @@ int8_t fs_parse_command(char *comm_line) {
 
             printf("Create FD for %s: %d\n", arguments[1], rfd);
             return 0;
+        case 'w': {
+            char *endptr = NULL;
+            unsigned int cfd, csize;
+            if (!arguments[1] || !arguments[2]) {
+                printf("Enter fd and size\n");
+                return -1;
+            }
+            
+            cfd = strtoul(
+                arguments[1],
+                &endptr,
+                0
+            );
+
+            if (endptr == arguments[1] || *endptr != '\0') {
+                printf("Enter FD\n");
+                return -1;
+            }
+
+            endptr = NULL;
+
+            csize = strtoul(
+                arguments[2],
+                &endptr,
+                0
+            );
+
+            if (endptr == arguments[2] || *endptr != '\0') {
+                printf("Enter size\n");
+                return -1;
+            }
+
+            int8_t ret = __write_fd(cfd, csize);
+            if (ret == -1) {
+                printf("Wrong FD\n");
+                return -1;
+            } else if (ret == -3) {
+                printf("Block error\n");
+                return -1;
+            }
+
+            printf("Write %u bytes\n", csize);
+            return 0;
+        }
+        case 'r': {
+            char *endptr = NULL;
+            unsigned int cfd, csize;
+            if (!arguments[1] || !arguments[2]) {
+                printf("Enter fd and size\n");
+                return -1;
+            }
+
+            cfd = strtoul(
+                arguments[1],
+                &endptr,
+                0
+            );
+
+            if (endptr == arguments[1] || *endptr != '\0') {
+                printf("Enter FD\n");
+                return -1;
+            }
+
+            endptr = NULL;
+
+            csize = strtoul(
+                arguments[2],
+                &endptr,
+                0
+            );
+
+            if (endptr == arguments[2] || *endptr != '\0') {
+                printf("Enter size\n");
+                return -1;
+            }
+
+            int8_t ret = __read_fd(cfd, csize);
+            if (ret == -1) {
+                printf("Wrong FD\n");
+                return -1;
+            } else if (ret == -2) {
+                printf("Block error\n");
+                return -1;
+            }
+
+            return 0;
+        }
+            
     }
 
     return INT8_MAX - 1;

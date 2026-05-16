@@ -8,6 +8,7 @@ block_t *bl_create(block_t *prev, block_t *next) {
 
     newb->prev = prev;
     newb->next = next;
+    newb->memsize = 0;
 
     return newb;
 }
