@@ -1,10 +1,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include "rfilesystem/filesystem.h"
 
 
-int main(int argc, char **argv) {
+int main() {
     char command[MAX_C];
 
     while (1) {
@@ -14,7 +15,7 @@ int main(int argc, char **argv) {
                 break;
         }
 
-        if (fs_parse_command(command) == 0) 
+        if (fs_parse_command(command) == INT8_MAX) 
             break;
 
         memset(command, 0, MAX_C);

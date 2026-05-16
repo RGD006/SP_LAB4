@@ -9,7 +9,57 @@
 #define MAX_ARG (16) // max number of arguments to parse
 
 static dir_t *root = NULL;
+static uint64_t fd = {0}; // 64 files descriptors
 static size_t id = 0;
+
+static int8_t __open_fd(const char *filepath) {
+    hard_link_t *step = root->head;
+    uint8_t file_find = 0;
+
+    if (!step) 
+        return -1;
+
+    // find file in dir
+    while (step != NULL) {
+        if (strcmp(step->name, filepath) == 0) {
+            file_find = 1;
+            break;
+        }
+
+        step = step->next;
+    }
+
+    if (!file_find) 
+        return -2; // can't find file in directory
+
+    // get fd from fd list
+    for (uint8_t i = 0; i < (sizeof(uint64_t) * 8); i++) {
+        uint64_t fd_mask = 1 << i;
+        uint8_t is_fd_free = fd & fd_mask;
+        if (!is_fd_free) {
+            fd |= fd_mask;
+            return i;
+        }
+    }
+
+    return -3; // all fd is reserved
+}
+
+static int8_t __close_fd(const unsigned long selected_fd) {
+    uint8_t is_fd_reserved = (fd >> selected_fd) & 1;
+
+    if (!is_fd_reserved) {
+        return -1;
+    }
+
+    fd &= ~(1 << selected_fd);
+
+    return 0;
+}
+
+static int8_t __write_fd(const uint8_t fd) {
+    return 0;
+}
 
 static char **__split_string(char *string, const char *delimeter) {
     if (!string || strlen(string) == 0)
@@ -122,26 +172,85 @@ int8_t fs_parse_command(char *comm_line) {
     // }
     char *command = arguments[0];
 
-    if (strcmp(command, "quit") == 0) {
-        return 0;
-    } else if (strcmp(command, "create") == 0) {
-        if (arguments[1])
-            __create_file(arguments[1]);
-    } else if (strcmp(command, "ls") == 0) {
-        __show_directory();
-    } else if (strcmp(command, "stat") == 0) {
-        if (arguments[1]) {
+    switch (command[0]) {
+        case 'q':
+            return INT8_MAX;
+        case 'c':
+            switch (command[1]) {
+                case 'r':
+                    if (!arguments[1]) {
+                        printf("Enter arguments\n");
+                        return -1;
+                    }
+                    
+                    __create_file(arguments[1]);
+                    return 0;
+                case 'l':
+                    if (!arguments[1]) {
+                        printf("Enter arguments\n");
+                        return -1;
+                    }
+
+                    char *endptr = NULL;
+                    unsigned long converted = strtoul(
+                        arguments[1],
+                        &endptr,
+                        5
+                    );
+
+                    if (endptr == arguments[1] || *endptr != '\0') {
+                        printf("Enter digit to close FD\n");
+                        return -1;
+                    } else if (__close_fd(converted) == 0) {
+                        // FD success close
+                        printf("FD %lu is closed\n", converted);
+                        return 0;
+                    }
+
+                    return -1;
+            }
+            return -1;
+        case 'l':
+            __show_directory();
+            return 0;
+        case 's':
+            if (!arguments[1]) {
+                printf("Enter arguments\n");
+                return -1;
+            } 
+
             int8_t result = __stat_file(arguments[1]);
 
             if (result == -2) {
                 printf("Can't find file %s\n", arguments[1]);
                 return -1;
             }
-        } 
 
-        return -1;
+            return 0;
+
+        case 'o':
+            if (!arguments[1]) {
+                printf("Enter filepath\n");
+                return -1;
+            }
+
+            int8_t rfd = __open_fd(arguments[1]);
+
+            switch (rfd) {
+                case -1:
+                    printf("FS is not init\n");
+                    return -1;
+                case -2:
+                    printf("Can't find file in path\n");
+                    return -1;
+                case -3:
+                    printf("All FD is reserved\n");
+                    return -1;
+            }
+
+            printf("Create FD for %s: %d\n", arguments[1], rfd);
+            return 0;
     }
-    
 
-    return INT8_MAX;
+    return INT8_MAX - 1;
 }
