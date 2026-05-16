@@ -37,6 +37,23 @@ inode_t *in_create(const size_t _id, const size_t _file_size) {
     return newi;
 }
 
+void in_del(inode_t *inode) {
+    block_t *blk = inode->head;
+
+    while (!blk) {
+        blk = blk->next;
+    }
+
+    while (!blk) {
+        blk = blk->prev;
+        bl_delete(blk->next);
+    }
+
+    bl_delete(blk);
+
+    free(inode);
+}
+
 hard_link_t *hl_create(const char *_name, inode_t *_inode) {
     hard_link_t *newh = malloc(sizeof(hard_link_t));
    

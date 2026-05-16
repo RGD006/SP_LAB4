@@ -282,6 +282,163 @@ static int8_t __stat_file(char *path) {
     return -2;
 }
 
+static int8_t __link(const char *link_filename, const char *new_filename) {
+    if (!link_filename || !new_filename || !root)
+        return -1;
+
+    hard_link_t *link = root->head;
+    while (link != NULL) {
+        if (strcmp(link->name, link_filename) == 0)
+            break;
+        link = link->next;
+    }
+
+    if (!link)
+        return -2;
+
+    hard_link_t *step = root->head;
+    while (step != NULL) {
+        if (strcmp(step->name, new_filename) == 0)
+            return -4;
+        step = step->next;
+    }
+
+    hard_link_t *new_link = hl_create(new_filename, link->meta);
+    if (!new_link)
+        return -3;
+
+    new_link->meta->h_links_number++;
+    dir_add_hl(root, new_link);
+
+    return 0;
+}
+
+static int8_t __unlink(const char *filename) {
+    if (!filename || !root)
+        return -1;
+
+    hard_link_t *link = root->head;
+    while (link != NULL) {
+        if (strcmp(link->name, filename) == 0)
+            break;
+        link = link->next;
+    }
+
+    if (!link)
+        return -2;
+
+    if (link == root->head)
+        return -3;
+
+    inode_t *inode = link->meta;
+    inode->h_links_number--;
+
+    if (inode->h_links_number == 0) 
+       in_del(inode);
+
+    if (link->prev)
+        link->prev->next = link->next;
+
+    if (link->next)
+        link->next->prev = link->prev;
+
+    if (root->tail == link)
+        root->tail = link->prev;
+
+    free(link->name);
+    free(link);
+
+    return 0;
+}
+
+static int8_t __truncate_file(const char *name, uint64_t size) {
+    if (!name || !root)
+        return -1;
+
+    hard_link_t *link = root->head;
+    while (link != NULL) {
+        if (strcmp(link->name, name) == 0)
+            break;
+        link = link->next;
+    }
+
+    if (!link)
+        return -2;
+
+    inode_t *inode = link->meta;
+    size_t new_size = (size > SIZE_MAX) ? SIZE_MAX : (size_t)size;
+    size_t old_size = inode->file_size;
+
+    if (new_size > old_size) {
+        block_t *blk = inode->head;
+        if (!blk)
+            return -3;
+
+        size_t off = old_size;
+        size_t skip_blocks = off / MAX_B;
+        size_t in_block = off % MAX_B;
+        size_t left = new_size - old_size;
+
+        while (skip_blocks--) {
+            if (!blk->next) {
+                blk->next = bl_create(blk, NULL);
+                if (!blk->next)
+                    return -3;
+            }
+            blk = blk->next;
+        }
+
+        while (left > 0) {
+            size_t chunk = MAX_B - in_block;
+            if (chunk > left)
+                chunk = left;
+
+            memset(blk->data + in_block, 0, chunk);
+            if (blk->memsize < in_block + chunk)
+                blk->memsize = in_block + chunk;
+
+            left -= chunk;
+            in_block = 0;
+
+            if (left > 0) {
+                if (!blk->next) {
+                    blk->next = bl_create(blk, NULL);
+                    if (!blk->next)
+                        return -3;
+                }
+                blk = blk->next;
+            }
+        }
+    } else if (new_size < old_size) {
+        size_t idx = 0;
+        block_t *blk = inode->head;
+        while (blk != NULL) {
+            size_t block_start = idx * MAX_B;
+            size_t block_end = block_start + MAX_B;
+
+            if (block_start >= new_size) {
+                memset(blk->data, 0, MAX_B);
+                blk->memsize = 0;
+            } else if (block_end > new_size) {
+                size_t keep = new_size - block_start;
+                memset(blk->data + keep, 0, MAX_B - keep);
+                blk->memsize = keep;
+            } else if (blk->memsize > MAX_B) {
+                blk->memsize = MAX_B;
+            }
+
+            blk = blk->next;
+            idx++;
+        }
+    }
+
+    inode->file_size = new_size;
+    if (inode->offset > new_size)
+        inode->offset = new_size;
+
+    return 0;
+}
+
 int8_t fs_parse_command(char *comm_line) {
     if (!root)
         root = dir_create(id);
@@ -340,6 +497,28 @@ int8_t fs_parse_command(char *comm_line) {
             }
             return -1;
         case 'l':
+            if (command[1] == 'i') {
+                if (!arguments[1] || !arguments[2]) {
+                    printf("Enter source and new link names\n");
+                    return -1;
+                }
+
+                int8_t ret = __link(arguments[1], arguments[2]);
+                if (ret == -2) {
+                    printf("Source file not found\n");
+                    return -1;
+                } else if (ret == -3) {
+                    printf("Link create error\n");
+                    return -1;
+                } else if (ret == -4) {
+                    printf("Name already exists\n");
+                    return -1;
+                }
+
+                printf("Link created: %s -> %s\n", arguments[2], arguments[1]);
+                return 0;
+            }
+
             __show_directory();
             return 0;
         case 's':
@@ -516,6 +695,48 @@ int8_t fs_parse_command(char *comm_line) {
                 return -1;
             }
 
+            return 0;
+        }
+        case 'u':
+            if (!arguments[1]) {
+                printf("Enter filename\n");
+                return -1;
+            }
+
+            switch (__unlink(arguments[1])) {
+                case -2:
+                    printf("File not found\n");
+                    return -1;
+                case -3:
+                    printf("Can't unlink root entry\n");
+                    return -1;
+            }
+
+            printf("Unlinked %s\n", arguments[1]);
+            return 0;
+        case 't': {
+            if (command[1] != 'r' || !arguments[1] || !arguments[2]) {
+                printf("Usage: truncate <name> <size>\n");
+                return -1;
+            }
+
+            char *endptr = NULL;
+            unsigned long new_size = strtoul(arguments[2], &endptr, 0);
+            if (endptr == arguments[2] || *endptr != '\0') {
+                printf("Enter size\n");
+                return -1;
+            }
+
+            int8_t ret = __truncate_file(arguments[1], new_size);
+            if (ret == -2) {
+                printf("File not found\n");
+                return -1;
+            } else if (ret == -3) {
+                printf("Block error\n");
+                return -1;
+            }
+
+            printf("Truncate %s to %lu bytes\n", arguments[1], new_size);
             return 0;
         }
             
