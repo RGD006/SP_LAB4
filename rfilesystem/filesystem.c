@@ -11,6 +11,7 @@
 static dir_t *root = NULL, *user_pos = NULL;
 static hard_link_t *fd[MAX_FD] = {0};
 static size_t id = 0;
+static hard_link_t *insert_dir(char *path);
 
 const char *last_path_component(const char *path) {
     if (!path || *path == '\0')
@@ -33,25 +34,46 @@ const char *last_path_component(const char *path) {
     return path + len;
 }
 
-static int8_t __open_fd(const char *filepath) {
-    hard_link_t *step = user_pos->head;
-    uint8_t file_find = 0;
+static hard_link_t *__find_path(const char *path, uint8_t follow_last_symlink) {
+    if (!path)
+        return NULL;
 
-    if (!step) 
-        return -1;
+    char resolved[MAX_C];
+    snprintf(resolved, sizeof(resolved), "%s", path);
 
-    // find file in dir
-    while (step != NULL) {
-        if (strcmp(step->name, filepath) == 0) {
-            step->meta->flags.is_open = 1;
-            file_find = 1;
-            break;
+    for (size_t hops = 0; hops < 16; hops++) {
+        const char *find = last_path_component(resolved);
+        hard_link_t *step = insert_dir(resolved);
+
+        while (step != NULL) {
+            if (strcmp(step->name, find) == 0)
+                break;
+            step = step->next;
         }
 
-        step = step->next;
+        if (!step)
+            return NULL;
+
+        if (!follow_last_symlink || !step->meta || !step->meta->flags.is_symlink)
+            return step;
+
+        if (!step->meta->head)
+            return NULL;
+
+        size_t n = step->meta->head->memsize;
+        if (n >= sizeof(resolved))
+            n = sizeof(resolved) - 1;
+
+        memcpy(resolved, step->meta->head->data, n);
+        resolved[n] = '\0';
     }
 
-    if (!file_find) 
+    return NULL;
+}
+
+static int8_t __open_fd(const char *filepath) {
+    hard_link_t *step = __find_path(filepath, 1);
+    if (!step || !step->meta || step->meta->flags.is_dir)
         return -2; // can't find file in directory
 
     // get fd from fd list
@@ -70,8 +92,8 @@ static int8_t __close_fd(const unsigned long selected_fd) {
         return -1;
     }
 
-    fd[selected_fd] = NULL;
     fd[selected_fd]->meta->offset = 0;
+    fd[selected_fd] = NULL;
 
     return 0;
 }
@@ -237,29 +259,35 @@ static char **__split_string(char *string, const char *delimeter) {
 }
 
 static hard_link_t *insert_dir(char *path) {
-    char **dirs = __split_string(path, "/");
-
-    if (!dirs)
+    if (!path || !root || !user_pos)
         return NULL;
 
-    hard_link_t *step = path[0] == '/' ? root->head : user_pos->head;
-    size_t dir_step = 0;
+    if (strcmp(path, "/") == 0)
+        return root->head;
 
-    while (step != NULL) {
-        if (dirs[dir_step + 1] == NULL) 
-            break;
+    char copy[MAX_C];
+    snprintf(copy, sizeof(copy), "%s", path);
+    char **dirs = __split_string(copy, "/");
 
-        if (strcmp(step->name, dirs[dir_step]) == 0 || step->meta->flags.is_dir) {
-            if (step->meta->dhead || step->meta->dhead->head) {
-                    step = step->meta->dhead->head;
-                    dir_step++;
-                }
+    dir_t *curr = path[0] == '/' ? root : user_pos;
+    if (!dirs || !dirs[0])
+        return curr->head;
+
+    for (size_t i = 0; dirs[i + 1] != NULL; i++) {
+        hard_link_t *step = curr->head;
+        while (step != NULL) {
+            if (step->meta->flags.is_dir && strcmp(step->name, dirs[i]) == 0)
+                break;
+            step = step->next;
         }
-        
-        step = step->next;
+
+        if (!step || !step->meta || !step->meta->dhead)
+            return NULL;
+
+        curr = step->meta->dhead;
     }
 
-    return step;
+    return curr->head;
 }
 
 // TODO: make equal name fallback
@@ -267,10 +295,19 @@ static int8_t __create_file(const char *name) {
     if (!name) 
         return -1;
 
+    const char *fname = last_path_component(name);
+    hard_link_t *dir_head = insert_dir((char *)name);
+    if (!dir_head)
+        return -1;
+
     id++;
     inode_t *newi = in_create(id, 0);
-    hard_link_t *newh = hl_create(name, newi);
-    dir_add_hl(user_pos, newh);
+    hard_link_t *newh = hl_create(fname, newi);
+
+    hard_link_t *tail = dir_head;
+    while (tail->next != NULL)
+        tail = tail->next;
+    hl_add(tail, newh);
 
     return 0;
 }
@@ -304,59 +341,55 @@ static int8_t __show_directory(void) {
 static int8_t __stat_file(char *path) {
     if (!root)
         return -1;
-    
-    const char *find = last_path_component(path);
-    hard_link_t *step = insert_dir(path);
 
+    hard_link_t *step = __find_path(path, 1);
     if (!step)
-        return -1;
+        return -2;
 
-    while (step != NULL) { 
-        if (strcmp(find, step->name) == 0) {
-            printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\noffset: %lu\n", 
-                step->meta->id,
-                step->meta->file_size,
-                step->meta->h_links_number,
-                step->meta->create_time,
-                step->name,
-                step->meta->offset
-            );   
+    printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\noffset: %lu\n",
+        step->meta->id,
+        step->meta->file_size,
+        step->meta->h_links_number,
+        step->meta->create_time,
+        step->name,
+        step->meta->offset
+    );
 
-            return 0;
-        }
-        step = step->next;
-    }
-
-    return -2;
+    return 0;
 }
 
 static int8_t __link(const char *link_filename, const char *new_filename) {
     if (!link_filename || !new_filename || !root)
         return -1;
 
-    hard_link_t *link = user_pos->head;
-    while (link != NULL) {
-        if (strcmp(link->name, link_filename) == 0)
-            break;
-        link = link->next;
-    }
+    hard_link_t *link = __find_path(link_filename, 0);
 
     if (!link)
         return -2;
+    if (link->meta->flags.is_dir)
+        return -5;
 
-    hard_link_t *step = root->head;
+    const char *find = last_path_component(new_filename);
+    hard_link_t *dir_head = insert_dir((char *)new_filename);
+    hard_link_t *step = dir_head;
     while (step != NULL) {
-        if (strcmp(step->name, new_filename) == 0)
+        if (strcmp(step->name, find) == 0)
             return -4;
         step = step->next;
     }
 
-    hard_link_t *new_link = hl_create(new_filename, link->meta);
+    hard_link_t *new_link = hl_create(find, link->meta);
     if (!new_link)
         return -3;
 
     new_link->meta->h_links_number++;
-    dir_add_hl(root, new_link);
+    if (!dir_head)
+        return -3;
+
+    hard_link_t *tail = dir_head;
+    while (tail->next != NULL)
+        tail = tail->next;
+    hl_add(tail, new_link);
 
     return 0;
 }
@@ -365,15 +398,12 @@ static int8_t __unlink(const char *filename) {
     if (!filename || !root)
         return -1;
 
-    hard_link_t *link = user_pos->head;
-    while (link != NULL) {
-        if (strcmp(link->name, filename) == 0)
-            break;
-        link = link->next;
-    }
+    hard_link_t *link = __find_path(filename, 0);
 
     if (!link)
         return -2;
+    if (link->meta->flags.is_dir)
+        return -4;
 
     if (link == root->head)
         return -3;
@@ -403,12 +433,7 @@ static int8_t __truncate_file(const char *name, uint64_t size) {
     if (!name || !root)
         return -1;
 
-    hard_link_t *link = user_pos->head;
-    while (link != NULL) {
-        if (strcmp(link->name, name) == 0)
-            break;
-        link = link->next;
-    }
+    hard_link_t *link = __find_path(name, 1);
 
     if (!link)
         return -2;
@@ -491,13 +516,55 @@ int8_t __create_dir(const char *path) {
     if (!path)
         return -1;
 
+    const char *name = last_path_component(path);
+    hard_link_t *dir_head = insert_dir((char *)path);
+    if (!dir_head)
+        return -1;
+
     id++;
     inode_t *newi = in_create(id, 0);
     newi->flags.is_dir = 1;
     newi->dhead = dir_create(id);
     newi->dhead->dprev = user_pos; 
-    hard_link_t *newh = hl_create(path, newi);
-    dir_add_hl(user_pos, newh); 
+    hard_link_t *newh = hl_create(name, newi);
+
+    hard_link_t *tail = dir_head;
+    while (tail->next != NULL)
+        tail = tail->next;
+    hl_add(tail, newh);
+
+    return 0;
+}
+
+static int8_t __create_symlink(const char *target, const char *path) {
+    if (!target || !path || strlen(target) > MAX_B)
+        return -1;
+
+    if (__find_path(path, 0))
+        return -2;
+
+    const char *name = last_path_component(path);
+    hard_link_t *dir_head = insert_dir((char *)path);
+    if (!dir_head)
+        return -3;
+
+    id++;
+    inode_t *newi = in_create(id, strlen(target));
+    if (!newi || !newi->head)
+        return -4;
+
+    newi->flags.is_symlink = 1;
+    newi->head->memsize = strlen(target);
+    memcpy(newi->head->data, target, newi->head->memsize);
+
+    hard_link_t *newh = hl_create(name, newi);
+    if (!newh)
+        return -4;
+
+    hard_link_t *tail = dir_head;
+    while (tail->next != NULL)
+        tail = tail->next;
+    hl_add(tail, newh);
 
     return 0;
 }
@@ -506,11 +573,23 @@ int8_t __remove_dir(const char *path) {
     if (!path)
         return -1;
 
-    hard_link_t *step = user_pos->head;
+    const char *find = last_path_component(path);
+    hard_link_t *step = insert_dir((char *)path);
 
     while (step != NULL) {
-        if (step->meta->flags.is_dir && strcmp(path, step->name) == 0) {
-            hl_del(step);
+        if (step->meta->flags.is_dir && strcmp(find, step->name) == 0) {
+            if (step->meta->dhead && step->meta->dhead->head &&
+                step->meta->dhead->head->next != NULL) {
+                return -1; // directory is not empty
+            }
+
+            if (step->prev)
+                step->prev->next = step->next;
+            if (step->next)
+                step->next->prev = step->prev;
+
+            free(step->name);
+            free(step);
             return 0;
         }
 
@@ -531,10 +610,11 @@ int8_t __open_dir(const char *path) {
         return 0;
     }
 
-    hard_link_t *step = user_pos->head;
+    const char *find = last_path_component(path);
+    hard_link_t *step = insert_dir((char *)path);
 
     while (step != NULL) {
-        if (step->meta->flags.is_dir && strcmp(path, step->name) == 0) {
+        if (step->meta->flags.is_dir && strcmp(find, step->name) == 0) {
             user_pos = step->meta->dhead;
             return 0;
         }
@@ -542,7 +622,7 @@ int8_t __open_dir(const char *path) {
         step = step->next;
     }
 
-    return 0;
+    return -1;
 }
 
 int8_t fs_parse_command(char *comm_line) {
@@ -565,6 +645,26 @@ int8_t fs_parse_command(char *comm_line) {
     //     i++;
     // }
     char *command = arguments[0];
+
+    if (strcmp(command, "symlink") == 0) {
+        if (!arguments[1] || !arguments[2]) {
+            printf("Usage: symlink str pathname\n");
+            return -1;
+        }
+
+        int8_t ret = __create_symlink(arguments[1], arguments[2]);
+        if (ret == -1) {
+            printf("Wrong symlink arguments\n");
+            return -1;
+        } else if (ret == -2) {
+            printf("Path already exists\n");
+            return -1;
+        } else if (ret != 0) {
+            printf("Symlink create error\n");
+            return -1;
+        }
+        return 0;
+    }
 
     switch (command[0]) {
         case 'q':
@@ -627,6 +727,9 @@ int8_t fs_parse_command(char *comm_line) {
                     return -1;
                 } else if (ret == -4) {
                     printf("Name already exists\n");
+                    return -1;
+                } else if (ret == -5) {
+                    printf("Can't link directory\n");
                     return -1;
                 }
 
@@ -827,6 +930,9 @@ int8_t fs_parse_command(char *comm_line) {
                     return -1;
                 case -3:
                     printf("Can't unlink root entry\n");
+                    return -1;
+                case -4:
+                    printf("Can't unlink directory (use rmdir)\n");
                     return -1;
             }
 

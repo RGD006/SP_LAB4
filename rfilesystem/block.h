@@ -40,6 +40,7 @@ typedef struct _inode_t {
     struct flags {
         uint8_t is_open: 1;
         uint8_t is_dir: 1;
+        uint8_t is_symlink: 1;
     } flags;
     dir_t *dhead;
     block_t *head; // pointer to start of file 

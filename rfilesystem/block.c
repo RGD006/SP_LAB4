@@ -14,9 +14,14 @@ block_t *bl_create(block_t *prev, block_t *next) {
 }
 
 void bl_delete(block_t *block) {
+    if (!block)
+        return;
+
     memset(block->data, 0, MAX_B);
-    block->prev->next = block->next;
-    block->next->prev = block->prev;
+    if (block->prev)
+        block->prev->next = block->next;
+    if (block->next)
+        block->next->prev = block->prev;
     free(block);
 }
 
@@ -31,6 +36,7 @@ inode_t *in_create(const size_t _id, const size_t _file_size) {
     newi->h_links_number = 1;
     newi->create_time = time(NULL);
     newi->flags.is_open = 0;
+    newi->flags.is_symlink = 0;
     newi->offset = 0;
     newi->head = bl_create(NULL, NULL);
 
@@ -38,19 +44,12 @@ inode_t *in_create(const size_t _id, const size_t _file_size) {
 }
 
 void in_del(inode_t *inode) {
-    block_t *blk = inode->head;
-
-    while (!blk) {
-        blk = blk->next;
+    block_t *blk = inode ? inode->head : NULL;
+    while (blk) {
+        block_t *next = blk->next;
+        free(blk);
+        blk = next;
     }
-
-    while (!blk) {
-        blk = blk->prev;
-        bl_delete(blk->next);
-    }
-
-    bl_delete(blk);
-
     free(inode);
 }
 
@@ -60,7 +59,7 @@ hard_link_t *hl_create(const char *_name, inode_t *_inode) {
     if (!newh)
         return NULL;
 
-    newh->name = (char *)calloc(strlen(_name), sizeof(char));
+    newh->name = (char *)calloc(strlen(_name) + 1, sizeof(char));
     strcpy(newh->name, _name);
     newh->meta = _inode;
     newh->next = NULL;
