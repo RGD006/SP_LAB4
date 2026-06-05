@@ -1,6 +1,5 @@
 #include "filesystem.h"
 #include "block.h"
-#include "directory.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -9,12 +8,33 @@
 #define MAX_ARG (16) // max number of arguments to parse
 #define MAX_FD  (128) // max nummer of file descriptors
 
-static dir_t *root = NULL;
+static dir_t *root = NULL, *user_pos = NULL;
 static hard_link_t *fd[MAX_FD] = {0};
 static size_t id = 0;
 
+const char *last_path_component(const char *path) {
+    if (!path || *path == '\0')
+        return path;
+
+    size_t len = strlen(path);
+
+    while (len > 1 && path[len - 1] == '/')
+        len--;
+
+    while (len > 0 && path[len - 1] != '/')
+        len--;
+
+    if (len == 0)
+        return path;
+
+    if (path[len] == '\0')
+        return "/";
+
+    return path + len;
+}
+
 static int8_t __open_fd(const char *filepath) {
-    hard_link_t *step = root->head;
+    hard_link_t *step = user_pos->head;
     uint8_t file_find = 0;
 
     if (!step) 
@@ -216,6 +236,32 @@ static char **__split_string(char *string, const char *delimeter) {
     return result;
 }
 
+static hard_link_t *insert_dir(char *path) {
+    char **dirs = __split_string(path, "/");
+
+    if (!dirs)
+        return NULL;
+
+    hard_link_t *step = path[0] == '/' ? root->head : user_pos->head;
+    size_t dir_step = 0;
+
+    while (step != NULL) {
+        if (dirs[dir_step + 1] == NULL) 
+            break;
+
+        if (strcmp(step->name, dirs[dir_step]) == 0 || step->meta->flags.is_dir) {
+            if (step->meta->dhead || step->meta->dhead->head) {
+                    step = step->meta->dhead->head;
+                    dir_step++;
+                }
+        }
+        
+        step = step->next;
+    }
+
+    return step;
+}
+
 // TODO: make equal name fallback
 static int8_t __create_file(const char *name) {
     if (!name) 
@@ -224,7 +270,7 @@ static int8_t __create_file(const char *name) {
     id++;
     inode_t *newi = in_create(id, 0);
     hard_link_t *newh = hl_create(name, newi);
-    dir_add_hl(root, newh);
+    dir_add_hl(user_pos, newh);
 
     return 0;
 }
@@ -234,13 +280,14 @@ static int8_t __show_directory(void) {
     if (!root)
         return -1;
 
-    hard_link_t *step = root->head;
+    hard_link_t *step = user_pos->head;
 
     if (!step)
         return -1;
 
     while (step != NULL) {
-        printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\n", 
+        printf("link %c [%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\n", 
+            step->meta->flags.is_dir ? 'd' : 'f',
             step->meta->id,
             step->meta->file_size,
             step->meta->h_links_number,
@@ -257,14 +304,15 @@ static int8_t __show_directory(void) {
 static int8_t __stat_file(char *path) {
     if (!root)
         return -1;
-
-    hard_link_t *step = root->head;
+    
+    const char *find = last_path_component(path);
+    hard_link_t *step = insert_dir(path);
 
     if (!step)
         return -1;
 
     while (step != NULL) { 
-        if (strcmp(path, step->name) == 0) {
+        if (strcmp(find, step->name) == 0) {
             printf("file[%lu]\t<\t%lu,\t%lu,\t%lu>:\t%s\noffset: %lu\n", 
                 step->meta->id,
                 step->meta->file_size,
@@ -286,7 +334,7 @@ static int8_t __link(const char *link_filename, const char *new_filename) {
     if (!link_filename || !new_filename || !root)
         return -1;
 
-    hard_link_t *link = root->head;
+    hard_link_t *link = user_pos->head;
     while (link != NULL) {
         if (strcmp(link->name, link_filename) == 0)
             break;
@@ -317,7 +365,7 @@ static int8_t __unlink(const char *filename) {
     if (!filename || !root)
         return -1;
 
-    hard_link_t *link = root->head;
+    hard_link_t *link = user_pos->head;
     while (link != NULL) {
         if (strcmp(link->name, filename) == 0)
             break;
@@ -355,7 +403,7 @@ static int8_t __truncate_file(const char *name, uint64_t size) {
     if (!name || !root)
         return -1;
 
-    hard_link_t *link = root->head;
+    hard_link_t *link = user_pos->head;
     while (link != NULL) {
         if (strcmp(link->name, name) == 0)
             break;
@@ -439,9 +487,69 @@ static int8_t __truncate_file(const char *name, uint64_t size) {
     return 0;
 }
 
+int8_t __create_dir(const char *path) {
+    if (!path)
+        return -1;
+
+    id++;
+    inode_t *newi = in_create(id, 0);
+    newi->flags.is_dir = 1;
+    newi->dhead = dir_create(id);
+    newi->dhead->dprev = user_pos; 
+    hard_link_t *newh = hl_create(path, newi);
+    dir_add_hl(user_pos, newh); 
+
+    return 0;
+}
+
+int8_t __remove_dir(const char *path) {
+    if (!path)
+        return -1;
+
+    hard_link_t *step = user_pos->head;
+
+    while (step != NULL) {
+        if (step->meta->flags.is_dir && strcmp(path, step->name) == 0) {
+            hl_del(step);
+            return 0;
+        }
+
+        step = step->next;
+    }
+
+    return -1;
+}
+
+int8_t __open_dir(const char *path) {
+    if (!path)
+        return -1;
+
+    if (strcmp(path, "..") == 0) {
+        if (user_pos->dprev)
+            user_pos = user_pos->dprev;
+
+        return 0;
+    }
+
+    hard_link_t *step = user_pos->head;
+
+    while (step != NULL) {
+        if (step->meta->flags.is_dir && strcmp(path, step->name) == 0) {
+            user_pos = step->meta->dhead;
+            return 0;
+        }
+
+        step = step->next;
+    }
+
+    return 0;
+}
+
 int8_t fs_parse_command(char *comm_line) {
-    if (!root)
+    if (!root) {
         root = dir_create(id);
+        user_pos = root;
+    }
 
     char **arguments = __split_string(comm_line, " \t\n\r");
 
@@ -494,6 +602,13 @@ int8_t fs_parse_command(char *comm_line) {
                     }
 
                     return -1;
+                case 'd':
+                        if (__open_dir(arguments[1]) != 0) {
+                            printf("error\n");
+                            return -1;
+                        }
+
+                        return 0;
             }
             return -1;
         case 'l':
@@ -655,6 +770,9 @@ int8_t fs_parse_command(char *comm_line) {
             return 0;
         }
         case 'r': {
+            if (arguments[0][1] == 'm')
+                return __remove_dir(arguments[1]);
+
             char *endptr = NULL;
             unsigned int cfd, csize;
             if (!arguments[1] || !arguments[2]) {
@@ -739,7 +857,12 @@ int8_t fs_parse_command(char *comm_line) {
             printf("Truncate %s to %lu bytes\n", arguments[1], new_size);
             return 0;
         }
-            
+        case 'm':
+            if (__create_dir(arguments[1]) != 0) {
+                return -1;
+            }
+
+            return 0;
     }
 
     return INT8_MAX - 1;
